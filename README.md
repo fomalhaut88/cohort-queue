@@ -534,10 +534,6 @@ This creates a staircase-shaped allocation of items across cohorts and provides 
 
 ## License
 
-Add the license selected for the project here, for example:
-
 ```text
-MIT OR Apache-2.0
+MIT
 ```
-
-When publishing to crates.io, ensure the same license is declared in `Cargo.toml`.
