@@ -1,3 +1,46 @@
+//! A generic Rust queue that combines **FIFO fairness** with
+//! **controlled priority-based insertion**.
+//!
+//! `CohortQueue` is useful when a new item should be allowed to move ahead
+//! of some older items, but should not jump directly to the front of the
+//! queue. It achieves this by grouping items into ordered FIFO cohorts.
+//! A higher insertion order allows an item to join an earlier cohort,
+//! while preserving the order of all items already inside that cohort.
+//!
+//! # Example
+//!
+//! ```rust
+//! use cohort_queue::CohortQueue;
+//!
+//! let mut queue = CohortQueue::new();
+//!
+//! // First ordinary item creates the first cohort.
+//! queue.push("regular-1", 0);
+//!
+//! // Another order-0 item cannot join that cohort and creates a new one.
+//! queue.push("regular-2", 0);
+//!
+//! // This item may join a cohort whose historical width is at most 1.
+//! queue.push("priority-1", 1);
+//!
+//! assert_eq!(queue.pop(), Some("regular-1"));
+//! assert_eq!(queue.pop(), Some("priority-1"));
+//! assert_eq!(queue.pop(), Some("regular-2"));
+//! ```
+//!
+//! # Complexity
+//!
+//! | Operation  |  Complexity |
+//! | ---------- | ----------: |
+//! | `new`      |      O(1)   |
+//! | `len`      |      O(1)   |
+//! | `is_empty` |      O(1)   |
+//! | `top`      |      O(1)   |
+//! | `pop`      |      O(1)   |
+//! | `push`     |  O(log c)   |
+//!
+//! where `c` is the number of active cohorts.
+
 use std::collections::VecDeque;
 
 
@@ -27,6 +70,12 @@ impl<T> SubQueue<T> {
 }
 
 
+/// A queue that combines FIFO fairness with controlled
+/// priority-based insertion.
+///
+/// Items are grouped into ordered cohorts. A higher insertion order allows
+/// an item to join an earlier cohort, but it always remains behind
+/// existing members of that cohort.
 #[derive(Debug)]
 pub struct CohortQueue<T> {
     sub_queues: VecDeque<SubQueue<T>>,
@@ -35,6 +84,7 @@ pub struct CohortQueue<T> {
 
 
 impl<T> CohortQueue<T> {
+    /// Creates a new, empty `CohortQueue`.
     pub fn new() -> Self {
         Self {
             sub_queues: VecDeque::new(),
@@ -42,14 +92,22 @@ impl<T> CohortQueue<T> {
         }
     }
 
+    /// Returns true if the queue contains no items.
     pub fn is_empty(&self) -> bool {
         self.sub_queues.is_empty()
     }
 
+    /// Returns the total number of items currently in the queue across all
+    /// cohorts.
     pub fn len(&self) -> usize {
         self.len
     }
 
+    /// Appends an item to the earliest eligible cohort or creates a new one.
+    ///
+    /// An item joins the first cohort whose historical insertion count is
+    /// less than or equal to `order`. Returns the selected cohort's
+    /// historical insertion count before the new item was added.
     pub fn push(&mut self, item: T, order: usize) -> usize {
         if let Some(sub_queue) = self.find_sub_queue(order) {
             let order_inserted = sub_queue.order;
@@ -65,6 +123,9 @@ impl<T> CohortQueue<T> {
         }
     }
 
+    /// Removes and returns the front item from the earliest non-empty cohort.
+    ///
+    /// When a cohort becomes empty, it is removed automatically.
     pub fn pop(&mut self) -> Option<T> {
         if let Some(sub_queue) = self.sub_queues.front_mut() {
             let item = sub_queue.pop();
@@ -78,6 +139,7 @@ impl<T> CohortQueue<T> {
         }
     }
 
+    /// Returns a reference to the next item without removing it.
     pub fn top(&self) -> Option<&T> {
         self.sub_queues.front().and_then(|q| q.deque.front())
     }
