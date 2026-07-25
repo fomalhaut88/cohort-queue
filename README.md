@@ -4,7 +4,7 @@ A generic Rust queue that combines **FIFO fairness** with **controlled priority-
 
 `CohortQueue` is useful when a new item should be allowed to move ahead of some older items, but should not jump directly to the front of the queue.
 
-Instead of maintaining one flat queue, it groups items into ordered FIFO cohorts. A stronger insertion order allows an item to join an earlier cohort, while preserving the order of all items already inside that cohort.
+Instead of maintaining one flat queue, it groups items into ordered FIFO cohorts. A stronger insertion order allows an item to join an earlier eligible cohort, while preserving the order of all items already inside that cohort.
 
 ```text
 ordinary FIFO:       A B C D E
@@ -53,16 +53,18 @@ fn main() {
     let mut queue = CohortQueue::new();
 
     // The first ordinary item creates the first cohort.
-    assert_eq!(queue.push("regular-1", 0), 0);
+    queue.push("regular-1", 0);
 
     // Another order-0 item cannot join that cohort and creates a new one.
-    assert_eq!(queue.push("regular-2", 0), 0);
+    queue.push("regular-2", 0);
 
-    // This item may join a cohort whose historical width is at most 1.
-    assert_eq!(queue.push("priority-1", 1), 1);
+    // This item joins the first cohort whose current order is lower than 1.
+    queue.push("priority-1", 1);
 
-    // A larger order allows joining the earliest available cohort.
-    assert_eq!(queue.push("priority-2", 3), 2);
+    // A larger order allows joining the earliest eligible cohort.
+    queue.push("priority-2", 3);
+
+    assert_eq!(queue.top_order(), Some(3));
 
     assert_eq!(queue.pop(), Some("regular-1"));
     assert_eq!(queue.pop(), Some("priority-1"));
@@ -86,7 +88,7 @@ The first cohort is drained before the second one, while insertion order remains
 Each internal cohort maintains:
 
 * a FIFO queue of items;
-* a historical insertion count called its cohort order.
+* a current cohort order equal to the order of its most recently accepted item.
 
 When calling:
 
@@ -94,21 +96,21 @@ When calling:
 queue.push(item, order);
 ```
 
-the queue finds the earliest cohort whose historical insertion count is less than or equal to `order`.
+the queue finds the earliest cohort whose current order is strictly less than `order`.
 
-The item is appended to that cohort.
+The item is appended to that cohort, and the cohort order is replaced with `order`.
 
-If no existing cohort satisfies the condition, a new cohort is created at the back.
+If no existing cohort satisfies the condition, a new cohort is created at the back with the supplied order.
 
 Conceptually:
 
 ```text
 find the first cohort where:
 
-    cohort.order <= requested_order
+    cohort.order < requested_order
 ```
 
-A larger `order` therefore gives the item more opportunities to join an earlier cohort.
+A larger `order` therefore gives the item more opportunities to join an earlier cohort. Orders accepted into the same cohort are strictly increasing.
 
 ### Example
 
@@ -124,17 +126,17 @@ Insertion with:
 order = 4
 ```
 
-joins the second cohort, because it is the first cohort whose order is not greater than `4`:
+joins the fourth cohort, because it is the first cohort whose current order is strictly lower than `4`:
 
 ```text
 [5, 4, 4, 2, 1]
-    ^
+          ^
 ```
 
-After insertion, its historical order becomes `5`:
+After insertion, its order becomes `4`:
 
 ```text
-[5, 5, 4, 2, 1]
+[5, 4, 4, 4, 1]
 ```
 
 The sequence remains non-increasing, which allows the implementation to locate the cohort using binary partitioning.
@@ -143,10 +145,12 @@ The sequence remains non-increasing, which allows the implementation to locate t
 
 The `order` argument is not an absolute queue position.
 
-It is an insertion threshold:
+It is a strictly increasing admission value for a cohort:
 
-* `0` provides ordinary cohort-level FIFO behavior;
-* a larger value allows an item to join a wider and usually earlier cohort;
+* `0` cannot join an existing cohort and therefore creates a new one;
+* an item can join only a cohort whose current order is smaller;
+* an equal or smaller order cannot join that cohort;
+* a larger value can allow an item to join an earlier cohort;
 * an item is always appended behind every item already in the selected cohort;
 * existing items are never reordered.
 
@@ -168,26 +172,6 @@ let order = user_priority.min(MAX_ORDER);
 queue.push(job, order);
 ```
 
-## Return value of `push`
-
-`push` returns the selected cohort's historical insertion count before the new item was added:
-
-```rust
-let inserted_order = queue.push(item, requested_order);
-```
-
-This value is the item's sequence number inside that cohort's history.
-
-It is not:
-
-* the current global queue position;
-* the current number of items ahead;
-* the current length of the cohort.
-
-The historical count does not decrease when items are removed.
-
-This makes the insertion rule stable over the lifetime of a cohort.
-
 ## API
 
 ### Create a queue
@@ -205,10 +189,10 @@ let queue = CohortQueue::<String>::default();
 ### Insert an item
 
 ```rust
-let inserted_order = queue.push(item, order);
+queue.push(item, order);
 ```
 
-Appends the item to the earliest eligible cohort or creates a new cohort.
+Appends the item to the earliest cohort whose current order is strictly lower than `order`, or creates a new cohort at the back.
 
 ### Remove the next item
 
@@ -227,6 +211,14 @@ let item = queue.top();
 ```
 
 Returns a reference to the next item without removing it.
+
+### Inspect the earliest cohort order
+
+```rust
+let order = queue.top_order();
+```
+
+Returns the current order of the earliest cohort. This is the order of the most recently accepted item in that cohort, not necessarily the order originally supplied for the item returned by `top`.
 
 ### Get the number of items
 
@@ -254,7 +246,7 @@ A newly inserted high-order item cannot move ahead of existing members of the co
 
 Insertion never rearranges existing items.
 
-Only the destination cohort of the new item is selected.
+Only the destination cohort of the new item is selected, and that cohort's current order is updated.
 
 ### Controlled overtaking
 
@@ -264,9 +256,9 @@ This differs from a conventional priority queue, where a sufficiently high-prior
 
 ### Starvation resistance with bounded orders
 
-When insertion orders are bounded by a finite maximum, the historical width of a cohort eventually grows beyond that maximum.
+When insertion orders are bounded by a finite maximum, each cohort can accept only finitely many additional items because every accepted order must be strictly larger than its current order.
 
-After that point, no new items can join the cohort, so it can be drained completely.
+Once a cohort reaches the maximum order, no new items can join it, so it can be drained completely.
 
 Therefore, assuming calls to `pop` continue, bounded insertion orders prevent an earlier cohort from accepting new items indefinitely.
 
@@ -292,15 +284,16 @@ Let:
 * (n) be the total number of items;
 * (c) be the number of active cohorts.
 
-| Operation  |  Complexity |
-| ---------- | ----------: |
-| `new`      |      (O(1)) |
-| `len`      |      (O(1)) |
-| `is_empty` |      (O(1)) |
-| `top`      |      (O(1)) |
-| `pop`      |      (O(1)) |
-| `push`     | (O(\log c)) |
-| memory     |  (O(n + c)) |
+| Operation   |  Complexity |
+| ----------- | ----------: |
+| `new`       |      (O(1)) |
+| `len`       |      (O(1)) |
+| `is_empty`  |      (O(1)) |
+| `top`       |      (O(1)) |
+| `top_order` |      (O(1)) |
+| `pop`       |      (O(1)) |
+| `push`      | (O(\log c)) |
+| memory      |  (O(n + c)) |
 
 `push` uses `VecDeque::partition_point` over the ordered cohort metadata.
 
@@ -522,7 +515,7 @@ The queue can be viewed as a sequence of FIFO batches:
 C₀ | C₁ | C₂ | C₃ | ...
 ```
 
-A new item attempts to join the earliest cohort permitted by its requested order.
+A new item attempts to join the earliest cohort whose current order is strictly lower than its requested order.
 
 The complete processing order is:
 
