@@ -234,6 +234,52 @@ if queue.is_empty() {
 }
 ```
 
+### Iterate over items
+
+```rust
+for item in queue.iter() {
+    println!("{item:?}");
+}
+```
+
+Items are yielded by shared reference in processing order: FIFO within each cohort, starting with the earliest cohort.
+
+`CohortQueue` also implements `IntoIterator` for shared references, so the equivalent shorthand is available:
+
+```rust
+for item in &queue {
+    println!("{item:?}");
+}
+```
+
+Neither form consumes the queue or clones its items.
+
+### Mutate items
+
+```rust
+for item in queue.iter_mut() {
+    // Modify item.
+}
+```
+
+Mutable iteration follows the same processing order. It is also available through a mutable reference:
+
+```rust
+for item in &mut queue {
+    // Modify item.
+}
+```
+
+Mutating stored items does not affect cohort ordering because cohort orders are maintained separately from item values.
+
+### Clear the queue
+
+```rust
+queue.clear();
+```
+
+Removes all items and cohorts. After the call, the queue is empty and `len()` returns `0`. The queue can be reused normally.
+
 ## Properties
 
 ### FIFO inside every cohort
@@ -247,6 +293,10 @@ A newly inserted high-order item cannot move ahead of existing members of the co
 Insertion never rearranges existing items.
 
 Only the destination cohort of the new item is selected, and that cohort's current order is updated.
+
+### Consistent iteration order
+
+`iter`, `iter_mut`, and iteration over references traverse items in the same order in which repeated calls to `pop` would remove them.
 
 ### Controlled overtaking
 
@@ -284,18 +334,23 @@ Let:
 * (n) be the total number of items;
 * (c) be the number of active cohorts.
 
-| Operation   |  Complexity |
-| ----------- | ----------: |
-| `new`       |      (O(1)) |
-| `len`       |      (O(1)) |
-| `is_empty`  |      (O(1)) |
-| `top`       |      (O(1)) |
-| `top_order` |      (O(1)) |
-| `pop`       |      (O(1)) |
-| `push`      | (O(\log c)) |
-| memory      |  (O(n + c)) |
+| Operation        |  Complexity |
+| ---------------- | ----------: |
+| `new`            |      (O(1)) |
+| `len`            |      (O(1)) |
+| `is_empty`       |      (O(1)) |
+| `top`            |      (O(1)) |
+| `top_order`      |      (O(1)) |
+| `pop`            |      (O(1)) |
+| `push`           | (O(\log c)) |
+| create iterator  |      (O(1)) |
+| full iteration   |    (O(n+c)) |
+| `clear`          |    (O(n+c)) |
+| memory           |  (O(n + c)) |
 
 `push` uses `VecDeque::partition_point` over the ordered cohort metadata.
+
+Creating an iterator is constant-time. Traversing all items with `iter`, `iter_mut`, `&queue`, or `&mut queue` visits every item and cohort. `clear` destroys all stored items and cohort metadata.
 
 ## Practical use cases
 

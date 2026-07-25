@@ -42,6 +42,8 @@
 //!
 //! where `c` is the number of active cohorts.
 
+#![warn(missing_docs)]
+
 use std::collections::VecDeque;
 
 
@@ -88,6 +90,10 @@ impl<T> SubQueue<T> {
     fn iter(&self) -> impl Iterator<Item = &T> {
         self.deque.iter()
     }
+
+    fn iter_mut(&mut self) -> impl Iterator<Item = &mut T> {
+        self.deque.iter_mut()
+    }
 }
 
 
@@ -123,6 +129,14 @@ impl<T> CohortQueue<T> {
     /// cohorts.
     pub fn len(&self) -> usize {
         self.len
+    }
+
+    /// Removes all items and cohorts from the queue.
+    ///
+    /// After this call, the queue is empty and its length is zero.
+    pub fn clear(&mut self) {
+        self.sub_queues.clear();
+        self.len = 0;
     }
 
     /// Appends an item to the earliest eligible cohort or creates a new one.
@@ -179,6 +193,14 @@ impl<T> CohortQueue<T> {
         self.sub_queues.iter().flat_map(|q| q.iter())
     }
 
+    /// Returns a mutable iterator over all items in processing order.
+    ///
+    /// Items are yielded in FIFO order within each cohort, starting with the
+    /// earliest cohort. Mutating items does not affect cohort ordering.
+    pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut T> {
+        self.sub_queues.iter_mut().flat_map(|q| q.iter_mut())
+    }
+
     fn find_sub_queue(&mut self, order: usize) -> Option<&mut SubQueue<T>> {
         let ix = self.sub_queues.partition_point(|q| q.order() >= order);
         self.sub_queues.get_mut(ix)
@@ -193,15 +215,85 @@ impl<T> Default for CohortQueue<T> {
 }
 
 
+impl<'a, T> IntoIterator for &'a CohortQueue<T> {
+    type Item = &'a T;
+    type IntoIter = Box<dyn Iterator<Item = &'a T> + 'a>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        Box::new(self.iter())
+    }
+}
+
+
+impl<'a, T> IntoIterator for &'a mut CohortQueue<T> {
+    type Item = &'a mut T;
+    type IntoIter = Box<dyn Iterator<Item = &'a mut T> + 'a>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        Box::new(self.iter_mut())
+    }
+}
+
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::VecDeque;
+    use std::fmt::Debug;
+    use std::ops::RangeInclusive;
+
+    fn assert_internal_invariants<T>(cq: &CohortQueue<T>)
+    where
+        T: Debug + PartialEq,
+    {
+        let actual_len: usize = cq
+            .sub_queues
+            .iter()
+            .map(|q| q.deque.len())
+            .sum();
+
+        assert_eq!(cq.len, actual_len);
+        assert_eq!(cq.is_empty(), cq.len == 0);
+        assert_eq!(cq.is_empty(), cq.sub_queues.is_empty());
+
+        // Empty cohorts must be removed immediately.
+        assert!(cq.sub_queues.iter().all(|q| q.is_good()));
+
+        // Cohort orders must remain non-increasing.
+        let orders = cq
+            .sub_queues
+            .iter()
+            .map(|q| q.order())
+            .collect::<Vec<_>>();
+
+        assert!(
+            orders.windows(2).all(|pair| pair[0] >= pair[1]),
+            "cohort orders are not non-increasing: {orders:?}",
+        );
+
+        assert_eq!(cq.top(), cq.iter().next());
+        assert_eq!(cq.len(), cq.iter().count());
+    }
+
+    #[test]
+    fn test_default() {
+        let cq = CohortQueue::<i32>::default();
+
+        assert!(cq.is_empty());
+        assert_eq!(cq.len(), 0);
+        assert_eq!(cq.top(), None);
+        assert_eq!(cq.top_order(), None);
+        assert_eq!(cq.iter().next(), None);
+
+        assert_internal_invariants(&cq);
+    }
 
     #[test]
     fn test_trivial() {
         let mut cq = CohortQueue::<i32>::new();
 
         assert_eq!(cq.top(), None);
+        assert_eq!(cq.top_order(), None);
 
         cq.push(32, 0);
         cq.push(35, 0);
@@ -209,19 +301,60 @@ mod tests {
 
         assert_eq!(cq.len(), 3);
         assert_eq!(cq.top(), Some(&32));
+        assert_eq!(cq.top_order(), Some(0));
+
+        assert_eq!(
+            cq.iter().copied().collect::<Vec<_>>(),
+            vec![32, 35, 38],
+        );
+
+        assert_internal_invariants(&cq);
 
         assert_eq!(cq.pop(), Some(32));
         assert_eq!(cq.len(), 2);
+        assert_eq!(cq.top(), Some(&35));
 
         assert_eq!(cq.pop(), Some(35));
         assert_eq!(cq.len(), 1);
+        assert_eq!(cq.top(), Some(&38));
 
         assert_eq!(cq.pop(), Some(38));
         assert_eq!(cq.len(), 0);
 
         assert_eq!(cq.pop(), None);
+        assert_eq!(cq.pop(), None);
 
         assert!(cq.is_empty());
+        assert_eq!(cq.top(), None);
+        assert_eq!(cq.top_order(), None);
+
+        assert_internal_invariants(&cq);
+    }
+
+    #[test]
+    fn test_equal_orders_create_separate_cohorts() {
+        let mut cq = CohortQueue::new();
+
+        cq.push(10, 4);
+        cq.push(20, 4);
+        cq.push(30, 4);
+
+        assert_eq!(cq.sub_queues.len(), 3);
+
+        assert_eq!(
+            cq.sub_queues
+                .iter()
+                .map(|q| q.order())
+                .collect::<Vec<_>>(),
+            vec![4, 4, 4],
+        );
+
+        assert_eq!(
+            cq.iter().copied().collect::<Vec<_>>(),
+            vec![10, 20, 30],
+        );
+
+        assert_internal_invariants(&cq);
     }
 
     #[test]
@@ -234,11 +367,25 @@ mod tests {
         cq.push(35, 1);
         cq.push(38, 5);
 
+        // Strictly increasing orders join one cohort.
+        assert_eq!(cq.sub_queues.len(), 1);
+
         assert_eq!(cq.len(), 3);
         assert_eq!(cq.top(), Some(&32));
+        assert_eq!(cq.top_order(), Some(5));
+
+        assert_eq!(
+            cq.iter().copied().collect::<Vec<_>>(),
+            vec![32, 35, 38],
+        );
+
+        assert_internal_invariants(&cq);
 
         assert_eq!(cq.pop(), Some(32));
         assert_eq!(cq.len(), 2);
+
+        // top_order belongs to the cohort, not to the front item.
+        assert_eq!(cq.top_order(), Some(5));
 
         assert_eq!(cq.pop(), Some(35));
         assert_eq!(cq.len(), 1);
@@ -247,8 +394,9 @@ mod tests {
         assert_eq!(cq.len(), 0);
 
         assert_eq!(cq.pop(), None);
-
         assert!(cq.is_empty());
+
+        assert_internal_invariants(&cq);
     }
 
     #[test]
@@ -271,24 +419,32 @@ mod tests {
         assert_eq!(cq.len(), 9);
 
         assert_eq!(
-            cq.iter().cloned().collect::<Vec<_>>(),
+            cq.iter().copied().collect::<Vec<_>>(),
             vec![32, 35, 36, 37, 45, 48, 71, 79, 92],
         );
+
+        assert_internal_invariants(&cq);
 
         assert_eq!(cq.pop(), Some(32));
         assert_eq!(cq.pop(), Some(35));
 
         assert_eq!(cq.len(), 7);
-
+        assert_eq!(cq.top(), Some(&36));
         assert_eq!(cq.top_order(), Some(5));
 
         cq.push(38, 6);
         cq.push(49, 4);
 
+        assert_eq!(
+            cq.iter().copied().collect::<Vec<_>>(),
+            vec![36, 37, 38, 45, 48, 49, 71, 79, 92],
+        );
+
+        assert_internal_invariants(&cq);
+
         assert_eq!(cq.pop(), Some(36));
         assert_eq!(cq.pop(), Some(37));
         assert_eq!(cq.pop(), Some(38));
-
         assert_eq!(cq.pop(), Some(45));
 
         assert_eq!(cq.len(), 5);
@@ -296,8 +452,336 @@ mod tests {
         assert_eq!(cq.top_order(), Some(4));
 
         assert_eq!(
-            cq.iter().cloned().collect::<Vec<_>>(),
+            cq.iter().copied().collect::<Vec<_>>(),
             vec![48, 49, 71, 79, 92],
+        );
+
+        assert_internal_invariants(&cq);
+    }
+
+    #[test]
+    fn test_iter_mut() {
+        let mut cq = CohortQueue::new();
+
+        cq.push(10, 0);
+        cq.push(20, 0);
+        cq.push(30, 1);
+
+        assert_eq!(
+            cq.iter().copied().collect::<Vec<_>>(),
+            vec![10, 30, 20],
+        );
+
+        for item in cq.iter_mut() {
+            *item *= 2;
+        }
+
+        assert_eq!(
+            cq.iter().copied().collect::<Vec<_>>(),
+            vec![20, 60, 40],
+        );
+
+        assert_eq!(cq.len(), 3);
+        assert_eq!(cq.top_order(), Some(1));
+
+        assert_internal_invariants(&cq);
+    }
+
+    #[test]
+    fn test_into_iterator_for_shared_reference() {
+        #[derive(Debug, PartialEq, Eq)]
+        struct NonClone(i32);
+
+        let mut cq = CohortQueue::new();
+
+        cq.push(NonClone(10), 0);
+        cq.push(NonClone(20), 0);
+        cq.push(NonClone(30), 1);
+
+        let values = (&cq)
+            .into_iter()
+            .map(|item| item.0)
+            .collect::<Vec<_>>();
+
+        assert_eq!(values, vec![10, 30, 20]);
+
+        // Iteration borrows the queue and does not consume it.
+        assert_eq!(cq.len(), 3);
+        assert_eq!(cq.top(), Some(&NonClone(10)));
+    }
+
+    #[test]
+    fn test_into_iterator_for_mutable_reference() {
+        let mut cq = CohortQueue::new();
+
+        cq.push(10, 0);
+        cq.push(20, 0);
+        cq.push(30, 1);
+
+        for item in &mut cq {
+            *item += 100;
+        }
+
+        assert_eq!(
+            cq.iter().copied().collect::<Vec<_>>(),
+            vec![110, 130, 120],
+        );
+
+        assert_eq!(cq.len(), 3);
+        assert_eq!(cq.top_order(), Some(1));
+
+        assert_internal_invariants(&cq);
+    }
+
+    #[test]
+    fn test_clear() {
+        let mut cq = CohortQueue::new();
+
+        cq.push(10, 0);
+        cq.push(20, 0);
+        cq.push(30, 1);
+
+        assert_eq!(cq.len(), 3);
+        assert!(!cq.is_empty());
+
+        cq.clear();
+
+        assert_eq!(cq.len(), 0);
+        assert!(cq.is_empty());
+        assert_eq!(cq.top(), None);
+        assert_eq!(cq.top_order(), None);
+        assert_eq!(cq.iter().next(), None);
+        assert_eq!(cq.pop(), None);
+
+        assert_internal_invariants(&cq);
+
+        // The queue remains reusable.
+        cq.push(42, 7);
+
+        assert_eq!(cq.len(), 1);
+        assert_eq!(cq.top(), Some(&42));
+        assert_eq!(cq.top_order(), Some(7));
+        assert_eq!(cq.pop(), Some(42));
+        assert!(cq.is_empty());
+    }
+
+    #[test]
+    fn test_iterator_matches_pop_order() {
+        let input = [
+            (10, 0),
+            (20, 0),
+            (30, 2),
+            (40, 1),
+            (50, 5),
+            (60, 0),
+            (70, 3),
+        ];
+
+        let mut iter_queue = CohortQueue::new();
+        let mut pop_queue = CohortQueue::new();
+
+        for (item, order) in input {
+            iter_queue.push(item, order);
+            pop_queue.push(item, order);
+        }
+
+        let iterated = iter_queue.iter().copied().collect::<Vec<_>>();
+
+        let mut popped = Vec::new();
+
+        while let Some(item) = pop_queue.pop() {
+            popped.push(item);
+        }
+
+        assert_eq!(iterated, popped);
+        assert_eq!(iter_queue.len(), iterated.len());
+        assert!(pop_queue.is_empty());
+    }
+
+    #[test]
+    fn test_maximum_order() {
+        let mut cq = CohortQueue::new();
+
+        cq.push(10, 0);
+        cq.push(20, usize::MAX);
+        cq.push(30, usize::MAX);
+
+        // Equal usize::MAX cannot join the first cohort.
+        assert_eq!(cq.sub_queues.len(), 2);
+
+        assert_eq!(
+            cq.iter().copied().collect::<Vec<_>>(),
+            vec![10, 20, 30],
+        );
+
+        assert_eq!(cq.top_order(), Some(usize::MAX));
+
+        assert_internal_invariants(&cq);
+    }
+
+    struct ReferenceSubQueue<T> {
+        deque: VecDeque<T>,
+        order: usize,
+    }
+
+    struct ReferenceQueue<T> {
+        sub_queues: VecDeque<ReferenceSubQueue<T>>,
+        len: usize,
+    }
+
+    impl<T> ReferenceQueue<T> {
+        fn new() -> Self {
+            Self {
+                sub_queues: VecDeque::new(),
+                len: 0,
+            }
+        }
+
+        fn is_empty(&self) -> bool {
+            self.len == 0
+        }
+
+        fn len(&self) -> usize {
+            self.len
+        }
+
+        fn push(&mut self, item: T, order: usize) {
+            if let Some(sub_queue) = self
+                .sub_queues
+                .iter_mut()
+                .find(|q| q.order < order)
+            {
+                sub_queue.deque.push_back(item);
+                sub_queue.order = order;
+            } else {
+                self.sub_queues.push_back(ReferenceSubQueue {
+                    deque: VecDeque::from([item]),
+                    order,
+                });
+            }
+
+            self.len += 1;
+        }
+
+        fn pop(&mut self) -> Option<T> {
+            let sub_queue = self.sub_queues.front_mut()?;
+            let item = sub_queue.deque.pop_front();
+
+            if sub_queue.deque.is_empty() {
+                self.sub_queues.pop_front();
+            }
+
+            if item.is_some() {
+                self.len -= 1;
+            }
+
+            item
+        }
+
+        fn top(&self) -> Option<&T> {
+            self.sub_queues
+                .front()
+                .and_then(|q| q.deque.front())
+        }
+
+        fn top_order(&self) -> Option<usize> {
+            self.sub_queues.front().map(|q| q.order)
+        }
+
+        fn iter(&self) -> impl Iterator<Item = &T> {
+            self.sub_queues
+                .iter()
+                .flat_map(|q| q.deque.iter())
+        }
+    }
+
+    fn visit_order_sequences<F>(
+        sequence: &mut Vec<usize>,
+        max_len: usize,
+        values: RangeInclusive<usize>,
+        callback: &mut F,
+    )
+    where
+        F: FnMut(&[usize]),
+    {
+        callback(sequence);
+
+        if sequence.len() == max_len {
+            return;
+        }
+
+        for order in values.clone() {
+            sequence.push(order);
+            visit_order_sequences(sequence, max_len, values.clone(), callback);
+            sequence.pop();
+        }
+    }
+
+    #[test]
+    fn test_exhaustive_against_reference_implementation() {
+        let mut sequence = Vec::new();
+
+        visit_order_sequences(
+            &mut sequence,
+            7,
+            0..=3,
+            &mut |orders| {
+                let mut cq = CohortQueue::new();
+                let mut reference = ReferenceQueue::new();
+
+                for (item, &order) in orders.iter().enumerate() {
+                    cq.push(item, order);
+                    reference.push(item, order);
+
+                    assert_eq!(cq.len(), reference.len(), "orders: {orders:?}");
+                    assert_eq!(
+                        cq.is_empty(),
+                        reference.is_empty(),
+                        "orders: {orders:?}",
+                    );
+                    assert_eq!(cq.top(), reference.top(), "orders: {orders:?}");
+                    assert_eq!(
+                        cq.top_order(),
+                        reference.top_order(),
+                        "orders: {orders:?}",
+                    );
+
+                    assert_eq!(
+                        cq.iter().copied().collect::<Vec<_>>(),
+                        reference.iter().copied().collect::<Vec<_>>(),
+                        "orders: {orders:?}",
+                    );
+
+                    assert_internal_invariants(&cq);
+                }
+
+                while !reference.is_empty() {
+                    assert_eq!(
+                        cq.pop(),
+                        reference.pop(),
+                        "orders: {orders:?}",
+                    );
+
+                    assert_eq!(cq.len(), reference.len(), "orders: {orders:?}");
+                    assert_eq!(
+                        cq.is_empty(),
+                        reference.is_empty(),
+                        "orders: {orders:?}",
+                    );
+                    assert_eq!(cq.top(), reference.top(), "orders: {orders:?}");
+                    assert_eq!(
+                        cq.top_order(),
+                        reference.top_order(),
+                        "orders: {orders:?}",
+                    );
+
+                    assert_internal_invariants(&cq);
+                }
+
+                assert_eq!(cq.pop(), None, "orders: {orders:?}");
+                assert!(cq.is_empty(), "orders: {orders:?}");
+                assert_eq!(cq.len(), 0, "orders: {orders:?}");
+            },
         );
     }
 }
